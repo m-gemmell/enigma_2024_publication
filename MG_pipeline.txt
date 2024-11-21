@@ -1,0 +1,82 @@
+# Pre QIIME 2 Preprocessing
+
+#FastQ files were quality assessed with FastQC and MultiQC.
+fastqc -o fastqc/ *fastq
+multiqc -o multiqc/R1 fastqc/*R1_001*
+multiqc -o multiqc/R2 fastqc/*R2_001*
+#Adapters removed with trim_galore
+ls -1 *R1_001* | sed "s/_R1_001.fastq//" | \
+parallel -j 8 --gnu \
+"trim_galore -q 15 -o ../trimgalore --paired {}_R1_001.fastq {}_R2_001.fastq"
+
+# QIIME 2 Preprocessing
+#Import
+qiime tools import \
+--type 'SampleData[PairedEndSequencesWithQuality]' \
+--input-path new_manifest.tsv \
+--output-path paired_end.qza \
+--input-format PairedEndFastqManifestPhred33V2
+# Cutadapt
+qiime cutadapt trim-paired --p-cores 8 \
+--p-front-f AGRGTTHGATYMTGGCTCAG \
+--p-front-r TGCTGCCTCCCGTAGGAGT \
+--i-demultiplexed-sequences paired-end.qza \
+--o-trimmed-sequences cutadapt_paired_end.qza
+
+# Denoise
+qiime dada2 denoise-paired \
+--i-demultiplexed-seqs cutadapt_paired_end.qza \
+--p-trunc-len-f 240 --p-trunc-len-r 200 \
+--p-trim-left-r 20 --p-trunc-q 2 \
+--o-representative-sequences rep-seqs-dada2.qza \
+--o-table table-dada2.qza \
+--o-denoising-stats stats-dada2.qza
+
+## Taxonomic classification
+#Import database
+qiime tools import \
+--type 'FeatureData[Sequence]' \
+--input-path gg_13_8_otus/rep_set/99_otus.fasta \
+--output-path 99_otus.qza
+qiime tools import \
+--type 'FeatureData[Taxonomy]' \
+--input-format HeaderlessTSVTaxonomyFormat \
+--input-path gg_13_8_otus/taxonomy/99_otu_taxonomy.txt \
+--output-path 99_otu_ref_taxonomy.qza
+#Extract region of interest
+qiime feature-classifier extract-reads \
+--i-sequences 99_otus.qza \
+--p-f-primer AGRGTTHGATYMTGGCTCAG \
+--p-r-primer TGCTGCCTCCCGTAGGAGT \
+--p-min-length 280 --p-max-length 400 \
+--o-reads 99_otus_ref_seqs.qza
+#Train classifier
+qiime feature-classifier fit-classifier-naive-bayes \
+--i-reference-reads 99_otus_ref_seqs.qza \
+--i-reference-taxonomy 99_otu_ref_taxonomy.qza \
+--o-classifier 99_otus_classifier.qza
+#Classification
+qiime feature-classifier classify-sklearn \
+--i-classifier /qiime2_tax_db/99_otus_classifier.qza \
+--i-reads rep-seqs-dada2.qza \
+--o-classification taxonomy.qza  
+
+## Phylogeny
+qiime phylogeny align-to-tree-mafft-fasttree \
+--i-sequences rep-seqs-dada2.qza \
+--o-alignment aligned-rep-seqs.qza \
+--o-masked-alignment masked-aligned-rep-seqs.qza \
+--o-tree unrooted-tree.qza \
+--o-rooted-tree rooted-tree.qza
+
+## Diversity analysis
+qiime diversity core-metrics-phylogenetic \
+--i-phylogeny rooted-tree.qza \
+--i-table table-dada2.qza \
+--p-sampling-depth 5584 \
+--m-metadata-file ../metadata.tsv \
+--output-dir asv-core-metrics-results
+
+
+
+
